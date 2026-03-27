@@ -11,26 +11,26 @@ done
 
 LOCAL_PGSOCKET_DIR="${LOCAL_PGSOCKET_DIR:-/var/run/postgresql}"
 
-# ---------------- Workload connection defaults ----------------
+# ---------------- Параметры подключения для нагрузки по умолчанию (Workload connection defaults) ----------------
 PGHOST="${PGHOST:-$LOCAL_PGSOCKET_DIR}"
 PGPORT="${PGPORT:-5432}"
-PGDATABASE="${PGDATABASE:-dam_test}"
-PGUSER="${PGUSER:-dam_tuz}"
-PGPASSWORD="${PGPASSWORD:-dam_tuz_pass}"
+PGDATABASE="${PGDATABASE:-stresser_test}"
+PGUSER="${PGUSER:-stresser_user}"
+PGPASSWORD="${PGPASSWORD:-stresser_pass}"
 export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
 
-# ---------------- Target objects ----------------
-TEST_SCHEMA="${TEST_SCHEMA:-dam_probe}"
+# ---------------- Целевые объекты (Target objects) ----------------
+TEST_SCHEMA="${TEST_SCHEMA:-stresser_probe}"
 TEST_TABLE="${TEST_TABLE:-sql_events}"
 
-# ---------------- Admin connection defaults ----------------
+# ---------------- Параметры административного подключения по умолчанию (Admin connection defaults) ----------------
 ADMIN_HOST="${PGADMIN_HOST:-$PGHOST}"
 ADMIN_PORT="${PGADMIN_PORT:-$PGPORT}"
 ADMIN_DATABASE="${PGADMIN_DATABASE:-postgres}"
 ADMIN_USER="${PGADMIN_USER:-postgres}"
 ADMIN_PASSWORD="${PGADMIN_PASSWORD:-}"
 
-# ---------------- Runtime defaults ----------------
+# ---------------- Параметры выполнения по умолчанию (Runtime defaults) ----------------
 SETUP=0
 RECREATE_ZONE=0
 RUN_LOAD=0
@@ -41,17 +41,14 @@ DB_SOURCE="auto"
 INTERACTIVE=0
 RPM=10000
 DURATION=60
-POOL=8
 INITIAL_ROWS=200
-DRAIN_SECONDS=5
-COMMIT_EACH_OP=0
 ONLY=""
 REPORT_EVERY=5
 PAYLOAD_SIZE=64
 SESSION_WARMUP_SECONDS=1
 RUN_TAG=""
 
-# weights (used only if ONLY is empty or has multiple ops)
+# веса (используются только если ONLY пуст или содержит несколько операций) (weights used only if ONLY is empty or has multiple ops)
 W_SELECT=60
 W_INSERT=25
 W_UPDATE=10
@@ -62,7 +59,7 @@ usage() {
 Usage: $0 [options]
 
 Purpose:
-  Controlled SQL event generator for DAM validation on PostgreSQL.
+  Controlled SQL event generator for PostgreSQL validation and load checks.
   Can prepare a dedicated test zone, run controlled SQL load, or delete the test zone.
 
 Connection scenarios:
@@ -98,7 +95,7 @@ Connection source:
 
 Presets:
   --preset smoke             Small short run for quick verification (120 SQL/min, 60 sec)
-  --preset dam-check         Balanced run for DAM capture checks (600 SQL/min, 60 sec)
+  --preset balanced          Balanced default run (600 SQL/min, 60 sec)
   --preset high              Heavier run for higher throughput checks (5000 SQL/min, 60 sec)
 
 Options:
@@ -118,12 +115,9 @@ Options:
   --admin-password PASS       Admin password for auto prepare/delete
   --rpm N                     Target SQL statements per minute (default $RPM)
   --duration SEC              Duration in seconds (default $DURATION)
-  --pool N                    Compatibility option; ignored in single-session mode
   --initial-rows N            Rows seeded by prepare mode (default $INITIAL_ROWS)
   --payload-size N            Payload size for INSERT/UPDATE text fields (default $PAYLOAD_SIZE)
-  --drain-seconds SEC         Compatibility option; ignored in single-session mode
   --tag TAG                   Marker added only to generated workload SQL (run/seq/op)
-  --commit-each-op            Wrap each generated SQL in explicit BEGIN/COMMIT
   --only OPS                  Comma-separated: select,insert,update,delete
   --select-weight N           SELECT weight (default $W_SELECT)
   --insert-weight N           INSERT weight (default $W_INSERT)
@@ -142,13 +136,10 @@ Examples:
   $0 --interactive
   $0 --mode prepare --db-source auto --admin-password secret
   $0 --mode prepare --db-source existing --host /var/run/postgresql --port 5432 --database mydb --user myuser --password secret
-  $0 --mode prepare --db-source existing --database mydb --user myuser --password secret --schema dam_probe
-  $0 --mode run --rpm 1200 --duration 60 --only select,insert --pool 6
+  $0 --mode prepare --db-source existing --database mydb --user myuser --password secret --schema stresser_probe
+  $0 --mode run --rpm 1200 --duration 60 --only select,insert
   $0 --mode delete --db-source auto --admin-password secret
   PGADMIN_USER=postgres PGADMIN_PASSWORD=secret $0 --mode prepare --db-source auto
-
-PowerShell via WSL:
-  wsl.exe bash -lc "cd '/mnt/d/.../scripts' && ./postgres-stresser.sh"
 EOF
 }
 
@@ -313,7 +304,7 @@ run_interactive_wizard() {
   local auto_source_description="Auto-create dedicated technical test zone"
 
   echo "=================================================="
-  echo "Interactive wizard: PostgreSQL DAM SQL Generator"
+  echo "Interactive wizard: pg-stresser for PostgreSQL"
   echo "=================================================="
   echo "No command-line flags are required."
   echo "Just answer the questions below."
@@ -337,7 +328,7 @@ run_interactive_wizard() {
   if [[ "$MODE" == "run" ]]; then
     preset_choice="$(prompt_menu "Step 3. Choose the load profile:" 2 \
       "smoke|Smoke: short and light run (120 SQL/min, 60 sec)" \
-      "dam-check|DAM check: balanced default run (600 SQL/min, 60 sec)" \
+      "balanced|Balanced: default run (600 SQL/min, 60 sec)" \
       "high|High: heavier run (5000 SQL/min, 60 sec)" \
       "custom|Custom: manual load settings")"
     if [[ "$preset_choice" == "custom" ]]; then
@@ -426,7 +417,6 @@ apply_preset() {
     smoke)
       RPM=120
       DURATION=60
-      POOL=2
       INITIAL_ROWS=50
       PAYLOAD_SIZE=32
       W_SELECT=70
@@ -434,10 +424,9 @@ apply_preset() {
       W_UPDATE=8
       W_DELETE=2
       ;;
-    dam-check)
+    balanced)
       RPM=600
       DURATION=60
-      POOL=4
       INITIAL_ROWS=200
       PAYLOAD_SIZE=64
       W_SELECT=60
@@ -448,7 +437,6 @@ apply_preset() {
     high)
       RPM=5000
       DURATION=60
-      POOL=12
       INITIAL_ROWS=1000
       PAYLOAD_SIZE=128
       W_SELECT=55
@@ -457,7 +445,7 @@ apply_preset() {
       W_DELETE=5
       ;;
     *)
-      die "unsupported preset: $1 (use smoke, dam-check or high)"
+      die "unsupported preset: $1 (use smoke, balanced or high)"
       ;;
   esac
 }
@@ -494,13 +482,13 @@ apply_mode() {
 
 ensure_run_tag() {
   if (( RUN_LOAD == 1 )) && [[ -z "$RUN_TAG" ]]; then
-    RUN_TAG="damrun_$(date +%Y%m%d_%H%M%S)_$RANDOM"
+    RUN_TAG="pgstresser_$(date +%Y%m%d_%H%M%S)_$RANDOM"
   fi
 }
 
 print_launch_summary() {
   echo "=================================================="
-  echo "Postgres DAM SQL Generator"
+  echo "pg-stresser for PostgreSQL"
   echo "=================================================="
   echo "Mode:           ${MODE:-custom}"
   echo "DB source:      $DB_SOURCE"
@@ -529,11 +517,6 @@ print_launch_summary() {
     echo "SQL/min / Duration: ${RPM} / ${DURATION}s"
     echo "Session mode:   single persistent psql session"
     echo "Run tag:        $RUN_TAG"
-    if (( COMMIT_EACH_OP == 1 )); then
-      echo "SQL mode:       explicit BEGIN/COMMIT around each operation"
-    else
-      echo "SQL mode:       one SQL statement per operation"
-    fi
     echo "Initial rows:   $INITIAL_ROWS"
     echo "Payload size:   $PAYLOAD_SIZE"
     if [[ -n "$ONLY" ]]; then
@@ -587,13 +570,9 @@ while [[ $# -gt 0 ]]; do
     --admin-password) ADMIN_PASSWORD="${2:-}"; ADMIN_ENV_EXPLICIT=1; shift 2 ;;
     --rpm) RPM="${2:-}"; shift 2 ;;
     --duration) DURATION="${2:-}"; shift 2 ;;
-    --pool) POOL="${2:-}"; shift 2 ;;
     --initial-rows) INITIAL_ROWS="${2:-}"; shift 2 ;;
     --payload-size) PAYLOAD_SIZE="${2:-}"; shift 2 ;;
-    --drain-seconds) DRAIN_SECONDS="${2:-}"; shift 2 ;;
     --tag) RUN_TAG="${2:-}"; shift 2 ;;
-    --commit-each-op) COMMIT_EACH_OP=1; shift ;;
-    --no-commit-each-op) COMMIT_EACH_OP=0; shift ;;
     --only) ONLY="${2:-}"; shift 2 ;;
     --select-weight) W_SELECT="${2:-}"; shift 2 ;;
     --insert-weight) W_INSERT="${2:-}"; shift 2 ;;
@@ -682,10 +661,8 @@ fi
 
 is_posint "$RPM" || die "--rpm must be a positive integer"
 is_posint "$DURATION" || die "--duration must be a positive integer"
-is_posint "$POOL" || die "--pool must be a positive integer"
 is_nonnegint "$INITIAL_ROWS" || die "--initial-rows must be a non-negative integer"
 is_nonnegint "$PAYLOAD_SIZE" || die "--payload-size must be a non-negative integer"
-is_nonnegint "$DRAIN_SECONDS" || die "--drain-seconds must be a non-negative integer"
 is_nonnegint "$REPORT_EVERY" || die "--report-every must be a non-negative integer"
 is_nonnegint "$W_SELECT" || die "--select-weight must be a non-negative integer"
 is_nonnegint "$W_INSERT" || die "--insert-weight must be a non-negative integer"
@@ -732,18 +709,8 @@ NEXT_DYNAMIC_ID=$((INITIAL_ROWS + 1))
 DELETE_QUEUE=()
 PENDING_INSERT_ID=""
 PENDING_DELETE_ID=""
-
-# ---- temp stats ----
-TMPDIR="${TMPDIR:-/tmp}"
-RUN_ID="$(date +%Y%m%d%H%M%S)_$RANDOM$RANDOM"
-LAT_FILE="$TMPDIR/pg_lat_${RUN_ID}.txt"
-OK_FILE="$TMPDIR/pg_ok_${RUN_ID}.txt"
-ERR_FILE="$TMPDIR/pg_err_${RUN_ID}.txt"
-: >"$LAT_FILE"
-: >"$OK_FILE"
-: >"$ERR_FILE"
-cleanup() { rm -f "$LAT_FILE" "$OK_FILE" "$ERR_FILE"; }
-trap cleanup EXIT
+SUCC_COUNT=0
+ERR_COUNT=0
 
 psql_workload() { psql -v ON_ERROR_STOP=1 "$@"; }
 psql_workload_quiet() { psql -v ON_ERROR_STOP=1 -qAt "$@"; }
@@ -850,7 +817,7 @@ tag_sql() {
   local seq="$2"
   local op="$3"
   if [[ -n "$RUN_TAG" ]]; then
-    printf "/* dam_run=%s seq=%s op=%s */ %s" "$RUN_TAG" "$seq" "$op" "$sql"
+    printf "/* pg_stresser_run=%s seq=%s op=%s */ %s" "$RUN_TAG" "$seq" "$op" "$sql"
   else
     printf "%s" "$sql"
   fi
@@ -888,7 +855,7 @@ ensure_role_and_database() {
 
 setup_schema_and_table() {
   local table_comment
-  table_comment="$(escape_sql_literal "DAM validation table generated by postgres-stresser.sh")"
+  table_comment="$(escape_sql_literal "Validation table generated by pg-stresser.sh")"
 
   PGOPTIONS="-c client_min_messages=warning" psql_workload -q <<SQL
 CREATE SCHEMA IF NOT EXISTS ${TEST_SCHEMA} AUTHORIZATION ${PGUSER};
@@ -897,7 +864,7 @@ DROP TABLE IF EXISTS ${TARGET_TABLE};
 CREATE TABLE ${TARGET_TABLE} (
   id BIGSERIAL PRIMARY KEY,
   event_name TEXT NOT NULL,
-  category TEXT NOT NULL DEFAULT 'dam',
+  category TEXT NOT NULL DEFAULT 'pg-stresser',
   payload TEXT NOT NULL,
   amount NUMERIC(12,2) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1140,38 +1107,21 @@ run_sql_in_session() {
 
 do_operation() {
   local op="$1"
-  local t0
-  local t1
-  local ms
   local base_sql=""
   local sql=""
 
   base_sql="$(make_sql_for_op "$op")" || {
-    echo "1" >>"$ERR_FILE"
+    ERR_COUNT=$((ERR_COUNT + 1))
     return 1
   }
   SQL_SEQ=$((SQL_SEQ + 1))
   sql="$(tag_sql "$base_sql" "$SQL_SEQ" "$op")"
 
-  t0="$(date +%s%N)"
-
-  if (( COMMIT_EACH_OP == 1 )); then
-    if ! run_sql_in_session "BEGIN;" || ! run_sql_in_session "$sql" || ! run_sql_in_session "COMMIT;"; then
-      run_sql_in_session "ROLLBACK;" >/dev/null 2>&1 || true
-      echo "1" >>"$ERR_FILE"
-      err_throttled "DB op failed (${op})"
-      return 1
-    fi
-  else
-    if ! run_sql_in_session "$sql"; then
-      echo "1" >>"$ERR_FILE"
-      err_throttled "DB op failed (${op})"
-      return 1
-    fi
+  if ! run_sql_in_session "$sql"; then
+    ERR_COUNT=$((ERR_COUNT + 1))
+    err_throttled "DB op failed (${op})"
+    return 1
   fi
-
-  t1="$(date +%s%N)"
-  ms=$(( (t1 - t0) / 1000000 ))
 
   case "$op" in
     insert)
@@ -1187,19 +1137,8 @@ do_operation() {
       ;;
   esac
 
-  echo "$ms" >>"$LAT_FILE"
-  echo "1" >>"$OK_FILE"
+  SUCC_COUNT=$((SUCC_COUNT + 1))
   return 0
-}
-
-pct_from_sorted_file() {
-  local f="$1"
-  local p="$2"
-  awk -v p="$p" '{a[NR]=$1} END{
-    if(NR==0){print "0.00"; exit}
-    idx=int(NR*p); if(idx>=NR) idx=NR-1
-    print a[idx+1]
-  }' "$f"
 }
 
 SCRIPT_START_DT="$(now_dt)"
@@ -1237,7 +1176,7 @@ INTERVAL_NS="$(awk -v s="$TOTAL_SUBMISSIONS" -v d="$DURATION" 'BEGIN{
 
 echo "Opening workload session..."
 start_workload_session || die "cannot start persistent workload session; check --host --port --database --user --password"
-trap 'stop_workload_session; cleanup' EXIT
+trap 'stop_workload_session' EXIT
 if (( SESSION_WARMUP_SECONDS > 0 )); then
   echo "Workload session is ready."
   echo "Waiting ${SESSION_WARMUP_SECONDS} sec before timed load start..."
@@ -1254,11 +1193,6 @@ echo "Duration:              $DURATION sec"
 echo "Planned submissions:   $TOTAL_SUBMISSIONS"
 echo "Session mode:          single persistent psql session"
 echo "Run tag:               $RUN_TAG"
-if (( COMMIT_EACH_OP == 1 )); then
-  echo "SQL mode:              explicit BEGIN/COMMIT around each operation"
-else
-  echo "SQL mode:              one SQL statement per operation"
-fi
 echo "Seed rows:             $INITIAL_ROWS"
 echo "Payload size:          $PAYLOAD_SIZE"
 if [[ -n "$ONLY" ]]; then
@@ -1299,44 +1233,26 @@ while (( SUBMITTED < TOTAL_SUBMISSIONS )); do
     elapsed_s=$(( now_s - (START_NS / 1000000000) ))
     if (( elapsed_s - LAST_REPORT_S >= REPORT_EVERY )); then
       LAST_REPORT_S="$elapsed_s"
-      succ="$(wc -l <"$OK_FILE" | tr -d ' ')"
-      err="$(wc -l <"$ERR_FILE" | tr -d ' ')"
-      echo "[Progress] ${elapsed_s}s | submitted ${SUBMITTED}/${TOTAL_SUBMISSIONS} | success ${succ} | errors ${err}"
+      echo "[Progress] ${elapsed_s}s | submitted ${SUBMITTED}/${TOTAL_SUBMISSIONS} | success ${SUCC_COUNT} | errors ${ERR_COUNT}"
     fi
   fi
 done
 
 stop_workload_session
+trap - EXIT
 
 TOTAL_END_NS="$(date +%s%N)"
 TOTAL_TIME_SEC="$(awk -v a="$START_NS" -v b="$TOTAL_END_NS" 'BEGIN{printf "%.6f",(b-a)/1e9}')"
 LOAD_END_DT="$(now_dt)"
 echo "Load end:    $LOAD_END_DT"
 
-SUCC="$(wc -l <"$OK_FILE" | tr -d ' ')"
-ERRS="$(wc -l <"$ERR_FILE" | tr -d ' ')"
+SUCC="$SUCC_COUNT"
+ERRS="$ERR_COUNT"
 COMPLETED=$((SUCC + ERRS))
 LOST=$((SUBMITTED - COMPLETED))
 (( LOST < 0 )) && LOST=0
 LOSS_PCT="$(awk -v l="$LOST" -v s="$SUBMITTED" 'BEGIN{ if(s>0) printf "%.2f",(l/s)*100; else print "0.00"}')"
 ACTUAL_RPM="$(awk -v s="$SUCC" -v d="$DURATION" 'BEGIN{ if(d>0) printf "%.1f",(s/d)*60; else print "0.0"}')"
-
-sort -n "$LAT_FILE" -o "$LAT_FILE" >/dev/null 2>&1 || true
-LAT_COUNT="$(wc -l <"$LAT_FILE" | tr -d ' ')"
-LAT_MIN="0.00"
-LAT_MAX="0.00"
-LAT_AVG="0.00"
-P50="0.00"
-P95="0.00"
-P99="0.00"
-if (( LAT_COUNT > 0 )); then
-  LAT_MIN="$(head -n 1 "$LAT_FILE")"
-  LAT_MAX="$(tail -n 1 "$LAT_FILE")"
-  LAT_AVG="$(awk '{sum+=$1} END{ if(NR>0) printf "%.2f",sum/NR; else print "0.00"}' "$LAT_FILE")"
-  P50="$(pct_from_sorted_file "$LAT_FILE" 0.50)"
-  P95="$(pct_from_sorted_file "$LAT_FILE" 0.95)"
-  P99="$(pct_from_sorted_file "$LAT_FILE" 0.99)"
-fi
 
 SCRIPT_END_DT="$(now_dt)"
 SCRIPT_END_NS="$(date +%s%N)"
@@ -1368,14 +1284,4 @@ echo
 echo "Successful:     $SUCC"
 echo "Errors:         $ERRS"
 echo "Actual SQL/min (by target window): $ACTUAL_RPM"
-echo
-echo "Latency summary"
-rule
-echo "Latency (ms):"
-echo "  Min:          $LAT_MIN"
-echo "  Avg:          $LAT_AVG"
-echo "  P50:          $P50"
-echo "  P95:          $P95"
-echo "  P99:          $P99"
-echo "  Max:          $LAT_MAX"
 echo "=================================================="
