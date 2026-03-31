@@ -37,7 +37,6 @@ RUN_LOAD=0
 DELETE_ZONE=0
 MODE=""
 PRESET=""
-DB_SOURCE="auto"
 INTERACTIVE=0
 RPM=10000
 DURATION=60
@@ -60,14 +59,7 @@ Usage: $0 [options]
 
 Purpose:
   Controlled SQL event generator for PostgreSQL validation and load checks.
-  Can prepare a dedicated test zone, run controlled SQL load, or delete the test zone.
-
-Connection scenarios:
-  1) Automatic test zone deployment:
-     The script can create role + database + schema + table automatically.
-
-  2) Existing PostgreSQL database:
-     The user can enter connection details for an already existing DB and use it.
+  Works only with the dedicated technical test zone created by the script.
 
 Quick start:
   1) Start with no arguments (recommended):
@@ -75,39 +67,34 @@ Quick start:
      or
      $0 --interactive
      or
-     $0 --mode prepare --db-source auto --admin-password secret
+     $0 --mode prepare --admin-password secret
 
   2) Run SQL load against an already prepared test zone:
-     $0 --mode run --preset smoke
+     $0 --mode run --preset test
 
-  3) Delete auto-created test zone:
-     $0 --mode delete --db-source auto --admin-password secret
+  3) Delete the test zone:
+     $0 --mode delete --admin-password secret
 
 Modes:
   --mode prepare             Prepare or recreate test zone
-  --mode run                 Run load against an existing test zone
+  --mode run                 Run load against the auto-created test zone
   --mode delete              Delete test zone
 
-Connection source:
-  --db-source auto           Use a dedicated technical DB/user created by the script
-  --db-source existing       Use an existing PostgreSQL database and user credentials
-  --interactive              Start step-by-step interactive wizard
-
 Presets:
-  --preset smoke             Small short run for quick verification (120 SQL/min, 60 sec)
-  --preset balanced          Balanced default run (600 SQL/min, 60 sec)
-  --preset high              Heavier run for higher throughput checks (5000 SQL/min, 60 sec)
+  --preset test              Small short run for quick verification (120 SQL/min, 60 sec)
+  --preset base              Base workload profile (5000 SQL/min, 300 sec)
+  --interactive              Start step-by-step interactive wizard
 
 Options:
   --setup                     Alias for --mode prepare
   --delete-zone               Alias for --mode delete
-  --host HOST                 Workload host or local socket dir (default $PGHOST)
-  --port PORT                 Workload port (default $PGPORT)
-  --database DB               Workload database / technical test DB (default $PGDATABASE)
-  --user USER                 Workload user / technical test user (default $PGUSER)
-  --password PASS             Workload password / technical test user password
-  --schema NAME               Target schema (default $TEST_SCHEMA)
-  --table NAME                Target table (default $TEST_TABLE)
+  --host HOST                 Technical DB host or local socket dir (default $PGHOST)
+  --port PORT                 Technical DB port (default $PGPORT)
+  --database DB               Technical test database name (default $PGDATABASE)
+  --user USER                 Technical test database user (default $PGUSER)
+  --password PASS             Technical test database password
+  --schema NAME               Technical test schema (default $TEST_SCHEMA)
+  --table NAME                Technical test table (default $TEST_TABLE)
   --admin-host HOST           Admin host or local socket dir for auto prepare/delete (default $ADMIN_HOST)
   --admin-port PORT           Admin port for auto prepare/delete (default $ADMIN_PORT)
   --admin-db DB               Admin database for auto prepare/delete (default $ADMIN_DATABASE)
@@ -134,12 +121,12 @@ Environment overrides:
 Examples:
   $0
   $0 --interactive
-  $0 --mode prepare --db-source auto --admin-password secret
-  $0 --mode prepare --db-source existing --host /var/run/postgresql --port 5432 --database mydb --user myuser --password secret
-  $0 --mode prepare --db-source existing --database mydb --user myuser --password secret --schema stresser_probe
+  $0 --mode prepare --admin-password secret
+  $0 --mode run --preset test
+  $0 --mode run --preset base
   $0 --mode run --rpm 1200 --duration 60 --only select,insert
-  $0 --mode delete --db-source auto --admin-password secret
-  PGADMIN_USER=postgres PGADMIN_PASSWORD=secret $0 --mode prepare --db-source auto
+  $0 --mode delete --admin-password secret
+  PGADMIN_USER=postgres PGADMIN_PASSWORD=secret $0 --mode prepare
 EOF
 }
 
@@ -300,8 +287,6 @@ prompt_auto_admin_connection() {
 run_interactive_wizard() {
   local preset_choice=""
   local custom_load=0
-  local auto_zone_mode="defaults"
-  local auto_source_description="Auto-create dedicated technical test zone"
 
   echo "=================================================="
   echo "Interactive wizard: pg-stresser for PostgreSQL"
@@ -311,27 +296,17 @@ run_interactive_wizard() {
   echo
 
   MODE="$(prompt_menu "Step 1. Choose the run mode:" 1 \
-    "prepare|Prepare or recreate test zone" \
-    "run|Run controlled SQL load" \
+    "run|Generate SQL requests in the auto-created test zone" \
+    "prepare|Create or recreate the auto-created test zone" \
     "delete|Delete test zone")"
 
-  case "$MODE" in
-    prepare) auto_source_description="Auto-create dedicated technical test zone" ;;
-    run) auto_source_description="Use previously auto-created technical test zone" ;;
-    delete) auto_source_description="Delete previously auto-created technical test zone" ;;
-  esac
-
-  DB_SOURCE="$(prompt_menu "Step 2. Choose the database source:" 1 \
-    "auto|${auto_source_description}" \
-    "existing|Use an already existing PostgreSQL database")"
-
   if [[ "$MODE" == "run" ]]; then
-    preset_choice="$(prompt_menu "Step 3. Choose the load profile:" 2 \
-      "smoke|Smoke: short and light run (120 SQL/min, 60 sec)" \
-      "balanced|Balanced: default run (600 SQL/min, 60 sec)" \
-      "high|High: heavier run (5000 SQL/min, 60 sec)" \
-      "custom|Custom: manual load settings")"
+    preset_choice="$(prompt_menu "Step 2. Choose the load profile:" 1 \
+      "test|Test: short and light run (120 SQL/min, 60 sec)" \
+      "base|Base: baseline run (5000 SQL/min, 300 sec)" \
+      "custom|Custom: set only RPM and duration")"
     if [[ "$preset_choice" == "custom" ]]; then
+      apply_preset base
       PRESET=""
       custom_load=1
     else
@@ -340,70 +315,35 @@ run_interactive_wizard() {
   fi
 
   echo
-  if [[ "$DB_SOURCE" == "auto" ]]; then
-    if [[ "$MODE" == "run" ]]; then
-      echo "Auto-created technical test zone selected."
-      echo "The script will use the dedicated technical database user for SQL generation."
-    elif [[ "$MODE" == "delete" ]]; then
-      echo "Auto-created technical test zone selected for deletion."
-    else
-      echo "Automatic test zone deployment selected."
-      echo "The script will use a dedicated technical database user for SQL generation."
-    fi
+  if [[ "$MODE" == "run" ]]; then
+    echo "SQL generation will run only in the auto-created technical test zone."
+    echo "The script will use the dedicated technical database user for SQL generation."
+  elif [[ "$MODE" == "delete" ]]; then
+    echo "The auto-created technical test zone will be deleted."
   else
-    echo "Existing database selected."
-    echo "Enter credentials of the already existing PostgreSQL database."
+    echo "The auto-created technical test zone will be created or recreated."
   fi
   echo
 
-  if [[ "$DB_SOURCE" == "auto" ]]; then
-    auto_zone_mode="$(prompt_menu "Technical test zone settings:" 1 \
-      "defaults|Quick: use the default technical DB/user/password/schema/table" \
-      "custom|Custom: set technical DB/user/password/schema/table manually")"
+  echo "Technical test zone:"
+  echo "  Host:     $PGHOST"
+  echo "  Port:     $PGPORT"
+  echo "  Database: $PGDATABASE"
+  echo "  User:     $PGUSER"
+  echo "  Password: $PGPASSWORD"
+  echo "  Schema:   $TEST_SCHEMA"
+  echo "  Table:    $TEST_TABLE"
 
-    if [[ "$auto_zone_mode" == "custom" ]]; then
-      echo
-      echo "Technical test zone settings."
-      PGHOST="$(prompt_with_default "PostgreSQL host / socket dir" "$PGHOST")"
-      PGPORT="$(prompt_with_default "PostgreSQL port" "$PGPORT")"
-      PGDATABASE="$(prompt_with_default "Technical database name" "$PGDATABASE")"
-      PGUSER="$(prompt_with_default "Technical database user" "$PGUSER")"
-      PGPASSWORD="$(prompt_secret_with_default "Technical database password" "$PGPASSWORD")"
-      TEST_SCHEMA="$(prompt_with_default "Schema name" "$TEST_SCHEMA")"
-      TEST_TABLE="$(prompt_with_default "Table name" "$TEST_TABLE")"
-    else
-      echo "Default technical test zone will be used:"
-      echo "  Host:     $PGHOST"
-      echo "  Port:     $PGPORT"
-      echo "  Database: $PGDATABASE"
-      echo "  User:     $PGUSER"
-      echo "  Password: $PGPASSWORD"
-      echo "  Schema:   $TEST_SCHEMA"
-      echo "  Table:    $TEST_TABLE"
-    fi
-  else
-    echo "Connection settings."
-    PGHOST="$(prompt_with_default "PostgreSQL host / socket dir" "$PGHOST")"
-    PGPORT="$(prompt_with_default "PostgreSQL port" "$PGPORT")"
-    PGDATABASE="$(prompt_with_default "Database name" "$PGDATABASE")"
-    PGUSER="$(prompt_with_default "Database user" "$PGUSER")"
-    PGPASSWORD="$(prompt_secret_with_default "Database password" "$PGPASSWORD")"
-    TEST_SCHEMA="$(prompt_with_default "Schema name" "$TEST_SCHEMA")"
-    TEST_TABLE="$(prompt_with_default "Table name" "$TEST_TABLE")"
-  fi
-
-  if [[ "$DB_SOURCE" == "auto" && ( "$MODE" == "prepare" || "$MODE" == "delete" ) ]]; then
+  if [[ "$MODE" == "prepare" || "$MODE" == "delete" ]]; then
     prompt_auto_admin_connection
   fi
 
   if [[ "$MODE" == "run" && $custom_load -eq 1 ]]; then
     echo
     echo "Custom load settings."
+    echo "Other workload parameters will use the base profile defaults."
     RPM="$(prompt_with_default "RPM (events per minute)" "$RPM")"
     DURATION="$(prompt_with_default "Duration in seconds" "$DURATION")"
-    INITIAL_ROWS="$(prompt_with_default "Initial seed rows" "$INITIAL_ROWS")"
-    PAYLOAD_SIZE="$(prompt_with_default "Payload size" "$PAYLOAD_SIZE")"
-    ONLY="$(prompt_with_default "Only operations (empty or select,insert,update,delete)" "$ONLY")"
   fi
 
   echo
@@ -414,7 +354,7 @@ run_interactive_wizard() {
 
 apply_preset() {
   case "$1" in
-    smoke)
+    test)
       RPM=120
       DURATION=60
       INITIAL_ROWS=50
@@ -424,19 +364,9 @@ apply_preset() {
       W_UPDATE=8
       W_DELETE=2
       ;;
-    balanced)
-      RPM=600
-      DURATION=60
-      INITIAL_ROWS=200
-      PAYLOAD_SIZE=64
-      W_SELECT=60
-      W_INSERT=25
-      W_UPDATE=10
-      W_DELETE=5
-      ;;
-    high)
+    base|based)
       RPM=5000
-      DURATION=60
+      DURATION=300
       INITIAL_ROWS=1000
       PAYLOAD_SIZE=128
       W_SELECT=55
@@ -445,7 +375,7 @@ apply_preset() {
       W_DELETE=5
       ;;
     *)
-      die "unsupported preset: $1 (use smoke, balanced or high)"
+      die "unsupported preset: $1 (use test or base)"
       ;;
   esac
 }
@@ -455,11 +385,7 @@ apply_mode() {
     prepare)
       SETUP=1
       DELETE_ZONE=0
-      if [[ "$DB_SOURCE" == "auto" ]]; then
-        RECREATE_ZONE=1
-      else
-        RECREATE_ZONE=0
-      fi
+      RECREATE_ZONE=1
       RUN_LOAD=0
       ;;
     run)
@@ -491,15 +417,10 @@ print_launch_summary() {
   echo "pg-stresser for PostgreSQL"
   echo "=================================================="
   echo "Mode:           ${MODE:-custom}"
-  echo "DB source:      $DB_SOURCE"
   if (( RUN_LOAD == 1 )); then
     [[ -n "$PRESET" ]] && echo "Preset:         $PRESET"
   fi
-  if [[ "$DB_SOURCE" == "auto" ]]; then
-    echo "Tech account:   ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}"
-  else
-    echo "Connection:     ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}"
-  fi
+  echo "Tech account:   ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}"
   echo "Target objects: ${TARGET_TABLE}"
   if (( SETUP == 1 )); then
     echo "Setup stage:    enabled"
@@ -533,17 +454,12 @@ print_launch_summary() {
 print_examples_hint() {
   echo "Hint:"
   echo "  Wizard:       $0"
-  if [[ "$DB_SOURCE" == "auto" ]]; then
-    echo "  Tech login:   ${PGUSER}"
-    echo "  Tech password:${PGPASSWORD}"
-    echo "  Prepare auto: $0 --mode prepare --db-source auto --admin-password <password>"
-    echo "  Load only:    $0 --mode run --db-source auto --host ${PGHOST} --port ${PGPORT} --database ${PGDATABASE} --user ${PGUSER} --password ${PGPASSWORD} --schema ${TEST_SCHEMA} --table ${TEST_TABLE} --preset smoke"
-    echo "  Delete zone:  $0 --mode delete --db-source auto --admin-password <password>"
-  else
-    echo "  Prepare DB:   $0 --mode prepare --db-source existing --host ${PGHOST} --port ${PGPORT} --database ${PGDATABASE} --user ${PGUSER} --password <password>"
-    echo "  Load only:    $0 --mode run --db-source existing --host ${PGHOST} --port ${PGPORT} --database ${PGDATABASE} --user ${PGUSER} --password <password> --preset smoke"
-    echo "  Delete zone:  $0 --mode delete --db-source existing --host ${PGHOST} --port ${PGPORT} --database ${PGDATABASE} --user ${PGUSER} --password <password> --schema ${TEST_SCHEMA} --table ${TEST_TABLE}"
-  fi
+  echo "  Tech login:   ${PGUSER}"
+  echo "  Tech password:${PGPASSWORD}"
+  echo "  Prepare zone: $0 --mode prepare --admin-password <password>"
+  echo "  Load test:    $0 --mode run --preset test"
+  echo "  Load base:    $0 --mode run --preset base"
+  echo "  Delete zone:  $0 --mode delete --admin-password <password>"
 }
 
 ARG_COUNT=$#
@@ -551,7 +467,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) MODE="${2:-}"; shift 2 ;;
     --preset) PRESET="${2:-}"; shift 2 ;;
-    --db-source) DB_SOURCE="${2:-}"; shift 2 ;;
     --interactive) INTERACTIVE=1; shift ;;
     --setup) MODE="prepare"; shift ;;
     --delete-zone) MODE="delete"; shift ;;
@@ -600,7 +515,6 @@ need sleep
 ONLY="$(printf '%s' "$ONLY" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
 MODE="$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
 PRESET="$(printf '%s' "$PRESET" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
-DB_SOURCE="$(printf '%s' "$DB_SOURCE" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
 
 if (( ARG_COUNT == 0 )) && [[ -t 0 ]] && [[ -t 1 ]]; then
   INTERACTIVE=1
@@ -609,11 +523,6 @@ fi
 if (( INTERACTIVE == 1 )); then
   run_interactive_wizard
 fi
-
-case "$DB_SOURCE" in
-  auto|existing) ;;
-  *) die "--db-source must be auto or existing" ;;
-esac
 
 if [[ -n "$PRESET" ]]; then
   apply_preset "$PRESET"
@@ -632,11 +541,8 @@ if [[ "$MODE" != "prepare" && $RECREATE_ZONE -eq 1 ]]; then
 fi
 
 [[ "$PGHOST" == /* ]] || die "PostgreSQL connection must use a local socket directory in --host, not TCP/loopback"
-
-if [[ "$DB_SOURCE" == "auto" ]]; then
-  [[ "$PGUSER" != "$ADMIN_USER" ]] || die "auto mode requires a dedicated technical user different from the admin user"
-  [[ "$PGDATABASE" != "$ADMIN_DATABASE" ]] || die "auto mode requires a dedicated technical database different from the admin database"
-fi
+[[ "$PGUSER" != "$ADMIN_USER" ]] || die "technical test user must differ from the admin user"
+[[ "$PGDATABASE" != "$ADMIN_DATABASE" ]] || die "technical test database must differ from the admin database"
 
 if (( SETUP == 1 || DELETE_ZONE == 1 )) && (( ADMIN_ENV_EXPLICIT == 1 )); then
   [[ "$ADMIN_HOST" == /* ]] || die "Admin connection must use a local socket directory in --admin-host, not TCP/loopback"
@@ -779,8 +685,8 @@ require_admin_mode() {
   resolve_admin_mode
   [[ "$ADMIN_MODE" != "none" ]] || die "this action needs admin access; use sudo for local PostgreSQL or pass --admin-*"
   if [[ "$ADMIN_MODE" == "env" && ( $RECREATE_ZONE -eq 1 || $DELETE_ZONE -eq 1 ) ]]; then
-    [[ "$ADMIN_DATABASE" != "$PGDATABASE" ]] || die "--admin-db must differ from target --database in auto prepare/delete mode"
-    [[ "$ADMIN_USER" != "$PGUSER" ]] || die "--admin-user must differ from target --user in auto prepare/delete mode"
+    [[ "$ADMIN_DATABASE" != "$PGDATABASE" ]] || die "--admin-db must differ from the technical test database"
+    [[ "$ADMIN_USER" != "$PGUSER" ]] || die "--admin-user must differ from the technical test user"
   fi
 }
 
@@ -888,48 +794,32 @@ SQL
 }
 
 delete_test_zone() {
-  if [[ "$DB_SOURCE" == "auto" ]]; then
-    echo "[Stage 1/1] Deleting test zone"
-    require_admin_mode
-    note "dropping database if exists: ${PGDATABASE}"
-    admin_psql -qAt -d "$ADMIN_DATABASE" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${PGDATABASE}' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
-    admin_psql -q -d "$ADMIN_DATABASE" -c "DROP DATABASE IF EXISTS ${PGDATABASE};" >/dev/null
-    note "dropping role if exists: ${PGUSER}"
-    admin_psql -q -d "$ADMIN_DATABASE" -c "DROP ROLE IF EXISTS ${PGUSER};" >/dev/null || true
-    note "test zone deleted: ${PGDATABASE}/${PGUSER}"
-    return 0
-  fi
-
-  echo "[Stage 1/1] Deleting test table"
-  workload_ping || die "cannot connect to target database; check --host --port --database --user --password"
-  PGOPTIONS="-c client_min_messages=warning" psql_workload -q <<SQL
-DROP TABLE IF EXISTS ${TARGET_TABLE};
-SQL
-  note "test table deleted: ${TARGET_TABLE}"
+  echo "[Stage 1/1] Deleting test zone"
+  require_admin_mode
+  note "dropping database if exists: ${PGDATABASE}"
+  admin_psql -qAt -d "$ADMIN_DATABASE" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${PGDATABASE}' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
+  admin_psql -q -d "$ADMIN_DATABASE" -c "DROP DATABASE IF EXISTS ${PGDATABASE};" >/dev/null
+  note "dropping role if exists: ${PGUSER}"
+  admin_psql -q -d "$ADMIN_DATABASE" -c "DROP ROLE IF EXISTS ${PGUSER};" >/dev/null || true
+  note "test zone deleted: ${PGDATABASE}/${PGUSER}"
 }
 
 prepare_environment() {
   if (( SETUP == 1 )); then
     echo "[Stage 1/1] Preparing test zone"
-    if [[ "$DB_SOURCE" == "auto" ]]; then
-      require_admin_mode
-      ensure_role_and_database
-      workload_ping || die "cannot connect with workload connection after auto-setup"
-    else
-      workload_ping || die "cannot connect using the provided existing DB credentials; check --host --port --database --user --password"
-    fi
+    require_admin_mode
+    ensure_role_and_database
+    workload_ping || die "cannot connect with workload connection after auto-setup"
 
     setup_schema_and_table
     note "test zone ready: ${PGDATABASE}.${TARGET_TABLE} as ${PGUSER}"
-    if [[ "$DB_SOURCE" == "auto" ]]; then
-      note "SQL generation must be started with the technical account: ${PGUSER}"
-      note "technical account password: ${PGPASSWORD}"
-      note "next run command: $0 --mode run --db-source auto --host ${PGHOST} --port ${PGPORT} --database ${PGDATABASE} --user ${PGUSER} --password ${PGPASSWORD} --schema ${TEST_SCHEMA} --table ${TEST_TABLE} --preset smoke"
-    fi
+    note "SQL generation must be started with the technical account: ${PGUSER}"
+    note "technical account password: ${PGPASSWORD}"
+    note "next run command: $0 --mode run --preset test"
     return 0
   fi
 
-  echo "[Stage 1/1] Using existing test zone"
+  echo "[Stage 1/1] Using the auto-created test zone"
   echo "No pre-run SQL checks will be executed."
 }
 
