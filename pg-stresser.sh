@@ -43,7 +43,8 @@ DURATION=60
 INITIAL_ROWS=200
 ONLY=""
 REPORT_EVERY=5
-PAYLOAD_SIZE=64
+PAYLOAD_SIZE=32
+PAYLOAD_SIZE_EXPLICIT=0
 SESSION_WARMUP_SECONDS=1
 RUN_TAG=""
 
@@ -288,6 +289,10 @@ run_interactive_wizard() {
   local preset_choice=""
   local custom_load=0
 
+  if (( PAYLOAD_SIZE_EXPLICIT == 0 )); then
+    PAYLOAD_SIZE=32
+  fi
+
   echo "=================================================="
   echo "Interactive wizard: pg-stresser for PostgreSQL"
   echo "=================================================="
@@ -342,6 +347,7 @@ run_interactive_wizard() {
     echo
     echo "Custom load settings."
     echo "Other workload parameters will use the base profile defaults."
+    echo "Payload size stays at ${PAYLOAD_SIZE} unless --payload-size is passed on script start."
     RPM="$(prompt_with_default "RPM (events per minute)" "$RPM")"
     DURATION="$(prompt_with_default "Duration in seconds" "$DURATION")"
   fi
@@ -358,7 +364,6 @@ apply_preset() {
       RPM=120
       DURATION=60
       INITIAL_ROWS=50
-      PAYLOAD_SIZE=32
       W_SELECT=70
       W_INSERT=20
       W_UPDATE=8
@@ -368,7 +373,6 @@ apply_preset() {
       RPM=5000
       DURATION=300
       INITIAL_ROWS=1000
-      PAYLOAD_SIZE=128
       W_SELECT=55
       W_INSERT=25
       W_UPDATE=15
@@ -486,7 +490,7 @@ while [[ $# -gt 0 ]]; do
     --rpm) RPM="${2:-}"; shift 2 ;;
     --duration) DURATION="${2:-}"; shift 2 ;;
     --initial-rows) INITIAL_ROWS="${2:-}"; shift 2 ;;
-    --payload-size) PAYLOAD_SIZE="${2:-}"; shift 2 ;;
+    --payload-size) PAYLOAD_SIZE="${2:-}"; PAYLOAD_SIZE_EXPLICIT=1; shift 2 ;;
     --tag) RUN_TAG="${2:-}"; shift 2 ;;
     --only) ONLY="${2:-}"; shift 2 ;;
     --select-weight) W_SELECT="${2:-}"; shift 2 ;;
